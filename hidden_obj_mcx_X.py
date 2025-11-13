@@ -103,17 +103,11 @@ cfg = {'nphoton': 1e7,
        'issaveref':1
        }
 
-
 cfg['prop'] = [[0,0,1,1],           # background
                [0.0019, 1.4800,0,1.44], # volume 1
                ]
 
-
-# plt.figure()
-# plt.imshow(dref_bd_rot.sum(axis = 2))
-# plt.show()
-
-#-----------------prepare the sensitibity map-------------
+#=========================prepare the sensitibity map=============================
 sems_path = os.path.join(data_fold,r'sensitivity_map_gain0.7_8x8cm_51x51points_binWidth15ps_expo0.1sec_binNum2000_40deg_061224.npy')
 sensitivity = np.load(sems_path).sum(2)
 sensitivity = sensitivity/sensitivity.max()
@@ -122,23 +116,16 @@ sensitivity = resize(sensitivity, (80,80), interpolation=cv2.INTER_LINEAR)
 sens_pad = np.zeros((250,250))
 sens_pad[125-40:125+40, 125-40:125+40] = sensitivity
 
-# plt.figure()
-# plt.imshow(sens_pad)
-# plt.show()
-
-
-#-----------------prepare the IRF---------------------
+#==============================prepare the IRF============================
 IRF_path = os.path.join(data_fold,r'IRF_gain0.7_timebin15ps_2000bins_061224.npy')
 IRF = np.load(IRF_path)[:1000]
-# IRF_down = resize(IRF[:667], (1, 101), interpolation=cv2.INTER_NEAREST_EXACT)
 IRF_down = resize(IRF[:np.round(121*100/15).astype('int')], (1, 121), interpolation=cv2.INTER_NEAREST_EXACT)
 IRF_down= np.squeeze(IRF_down)
-# plt.plot(IRF_down)
 
 #%% -----------------scan the points to get measurements------------
 
 # sim_mea = np.zeros((31,31,101));
-sim_mea = np.zeros((3,3,121));
+sim_mea = np.zeros((3,3,121))
 
 src_x_positions = np.linspace(125+25,125-25,sim_mea.shape[0]) # from PMT view, from right to left
 src_y_positions = np.linspace(125+25,125-25,sim_mea.shape[0]) # from PMT view, from up to down
@@ -148,7 +135,7 @@ src_y_positions = np.linspace(125+25,125-25,sim_mea.shape[0]) # from PMT view, f
 for i, pos_y in tqdm(enumerate(src_y_positions)):
     for j, pos_x in tqdm(enumerate(src_x_positions)):
         cfg['srcpos'] = [pos_x, pos_y, 0]
-        res = pmcx.run(cfg);
+        res = pmcx.run(cfg)
         dref_bd = res['dref'][:,:,int(vol.shape[2]-1),:] # get the boundary value
         dref_bd_rot = np.rot90(dref_bd, k=1, axes = (0,1)) # rotate the output to get correct angle
         sim_mea[i,j,:] = (dref_bd_rot*sens_pad[:,:,None]).sum((0,1)) # apply the sensitivity map
