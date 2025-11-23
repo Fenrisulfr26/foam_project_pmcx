@@ -557,3 +557,4 @@ Temporary Items
 *.mat
 *.pkl
 data
+MNIST_img_dataset

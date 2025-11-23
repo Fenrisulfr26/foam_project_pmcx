@@ -194,7 +194,6 @@ for img_index in tqdm(range(5000)):
         
     ground_truths[:,:,img_index] = img
  
-    
     obj_in_mcx_PMT_padding = cv2.copyMakeBorder(
         img, 
         100, 100, 100, 100,  # the padding range form four sides
