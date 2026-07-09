@@ -18,13 +18,14 @@ import os
 import gc
 
 class MCXPropertyFitter:
-    def __init__(self, unit_mm=1.0, thickness_mm=100):
+    def __init__(self,nphoton = 1e7 , unit_mm=1.0, thickness_mm=100):
         """
         初始化拟合器。
         """
         self.unit_mm = unit_mm
         self.thickness_mm = thickness_mm
-        
+        self.nphoton = nphoton
+
         # 内部容器
         self.irf_down = None
         self.sensitivity_pad = None
@@ -32,6 +33,11 @@ class MCXPropertyFitter:
         self.fit_weights = None
         self.vol = None
         self.cfg = {}
+        self.tstart = 0
+        self.tend = 15.1e-9
+        self.tstep = 0.1e-9
+        self.time_series_length = int(round((self.tend - self.tstart) / self.tstep))
+        self.irf_target_length = 100
         
         # 结果容器
         self.fitted_params = None 
@@ -83,7 +89,7 @@ class MCXPropertyFitter:
 
         }
 
-    def _hist_downsample(self, hist_15ps, target_length=121, dt_old=15.0, dt_new=100.0):
+    def _hist_downsample(self, hist_15ps, target_length=None, dt_old=15.0, dt_new=None):
         """
         将 15ps 数据重采样到 100ps，并强制输出固定长度。
         根据 target_length 自动计算所需的时间范围，并从原始数据中截取。
@@ -100,6 +106,10 @@ class MCXPropertyFitter:
         """
         
         # 1. 计算所需的总时间长度 (Total Duration needed)
+        if target_length is None:
+            target_length = self.time_series_length
+        if dt_new is None:
+            dt_new = self.tstep * 1e12
         required_duration = target_length * dt_new
         
         # 2. 检查原始数据够不够长
@@ -132,6 +142,15 @@ class MCXPropertyFitter:
         
         return hist_new
 
+    def _required_input_bins(self, dt_old_ps=15.0, target_length=None, dt_new_ps=None):
+        # 计算出需要的target的长度
+        if target_length is None:
+            target_length = self.time_series_length
+        if dt_new_ps is None:
+            dt_new_ps = self.tstep * 1e12
+        required_duration_ps = target_length * dt_new_ps
+        return int(np.ceil(required_duration_ps / dt_old_ps))
+
     def initialize_system(self):
         """加载系统通用资源"""
         print("Initializing system resources...")
@@ -140,8 +159,9 @@ class MCXPropertyFitter:
         irf_name = self.system_files['irf']
         irf_path = irf_name
         if not os.path.exists(irf_path): raise FileNotFoundError(f"IRF not found: {irf_path}")  
-        irf_raw = np.load(irf_path)[:850]
-        irf_down = self._hist_downsample(irf_raw)
+        input_bins_needed = self._required_input_bins(dt_old_ps=15.0, target_length=self.irf_target_length)
+        irf_raw = np.load(irf_path)[:input_bins_needed]
+        irf_down = self._hist_downsample(irf_raw, target_length=100) # 这里的target不能太长
         irf_down = irf_down / irf_down.max()  # normalize here 
         self.irf_down = irf_down
 
@@ -231,35 +251,31 @@ class MCXPropertyFitter:
                 print(f"Warning: Object file {obj_path} not found. Using homogeneous volume.")
 
         self.cfg = {
-            'nphoton': 1e7, 'vol': self.vol, 'tstart': 0, 'tend': 12.1e-9, 'tstep': 0.1e-9,
+            'nphoton': self.nphoton, 'vol': self.vol, 'tstart': self.tstart, 'tend': self.tend, 'tstep': self.tstep,
             'srcdir': [0, 0, 1], 'unitinmm': self.unit_mm, 'issrcfrom0': 1, 'issaveref': 1,
             'isreflect': 0, 'detpos': [125, 125, t_vox, 4] 
         }
+        self.time_series_length = int(round((self.cfg['tend'] - self.cfg['tstart']) / self.cfg['tstep']))
+        input_bins_needed = self._required_input_bins(dt_old_ps = 15.0)
 
         # 2. Load Exp Data
         exp_path = config['exp_file']
         print(f"Loading experiment data: {config['exp_file']}")
         full_data = np.load(exp_path)
-        
-        # Spatial 31x31 -> 3x3
-        if full_data.shape[0] == 31:
-            indices = [0, 15, 30]
-            exp_3x3 = full_data[np.ix_(indices, indices)] # 结果形状 (3, 3, 2000)
-            self.exp_data_processed = np.zeros((3, 3, 121))
-            for i in range(3):
-                for j in range(3):
-                    trace = exp_3x3[i, j, :1000] if exp_3x3.shape[2] >= 1000 else exp_3x3[i, j, :]
-                    self.exp_data_processed[i, j] = self._hist_downsample(trace)
-            self.exp_data_processed = self.exp_data_processed / self.exp_data_processed.max()
-        elif full_data.shape[0] == 3 and full_data.shape[2]>121:
-                self.exp_data_processed = np.zeros((3, 3, 121))
-                for i in range(3):
-                    for j in range(3):
-                        trace = full_data[i, j, :1000] if full_data.shape[2] >= 1000 else full_data[i, j, :]
-                        self.exp_data_processed[i, j] = self._hist_downsample(trace)
-                self.exp_data_processed = self.exp_data_processed / self.exp_data_processed.max()
-        else:
-            self.exp_data_processed = full_data
+        full_data[:, :, :276] = 0
+        full_data[:, :, 1109:] = 0
+
+        # Process 3x3x2000 experimental data
+        if full_data.shape[:2] != (3, 3):
+            raise ValueError(f"Expected 3x3 input data, got shape {full_data.shape}")
+
+        full_data = full_data - full_data.min(axis=2, keepdims=True)
+        self.exp_data_processed = np.zeros((3, 3, self.time_series_length))
+        for i in range(3):
+            for j in range(3):
+                trace = full_data[i, j, :input_bins_needed] if full_data.shape[2] >= input_bins_needed else full_data[i, j, :]
+                self.exp_data_processed[i, j] = self._hist_downsample(trace, target_length=self.time_series_length)
+        self.exp_data_processed = self.exp_data_processed / self.exp_data_processed.max()
         # Temporal 15ps -> 100ps
 
         self.fit_weights = self.exp_data_processed.max(axis=2)
@@ -267,7 +283,7 @@ class MCXPropertyFitter:
 
     def _forward_model(self, dummy_x, mu_a, mu_s, RI = 1.5): # fix the RI to be 1
         """前向模型"""
-        sim_3x3 = np.zeros((3, 3, 121))
+        sim_3x3 = np.zeros((3, 3, self.time_series_length))
         positions = [150, 125, 100] 
         self.cfg['prop'] = [[0, 0, 1, 1], [mu_a, mu_s, 0, RI]]
         
@@ -278,8 +294,11 @@ class MCXPropertyFitter:
                     res = pmcx.run(self.cfg)
                     dref_bd = res['dref'][:, :, int(self.vol.shape[2]-1), :]
                     dref_bd_rot = np.rot90(dref_bd, k=1, axes=(0, 1))
+                    plt.figure()
+                    plt.imshow(dref_bd_rot.sum(2))
+                    plt.show()
                     curve = (dref_bd_rot * self.sensitivity_pad[:, :, None]).sum((0, 1))
-                    limit = min(len(curve), 121)
+                    limit = min(len(curve), self.time_series_length)
                     sim_3x3[i, j, :limit] = curve[:limit]
                     del res, dref_bd, dref_bd_rot
             gc.collect()
@@ -287,12 +306,12 @@ class MCXPropertyFitter:
             # show intermediate fitting result
             print(f"Simulated with mu_a={mu_a:.6f}, mu_s={mu_s:.4f}, RI={RI:.4f}")
 
-            sim_3x3 = np.apply_along_axis(lambda m: fftconvolve(m, self.irf_down, mode='full'), axis=2, arr=sim_3x3)[:, :, :121]
+            sim_3x3 = np.apply_along_axis(lambda m: fftconvolve(m, self.irf_down, mode='full'), axis=2, arr=sim_3x3)[:, :, :self.time_series_length]
             if sim_3x3.max() > 0: sim_3x3 /= sim_3x3.max()
             return (sim_3x3 / self.fit_weights[:, :, None]).flatten()
         except Exception as e:
             print(f"Sim Error: {e}")
-            return np.zeros(3*3*121)
+            return np.zeros(3 * 3 * self.time_series_length)
 
     def run_fitting(self, p0=[0.0019, 1.48, 1.44], method='lm', bounds=(-np.inf, np.inf)):
         """
@@ -318,7 +337,7 @@ class MCXPropertyFitter:
 
             # 生成最佳拟合曲线
             fitted_flat = self._forward_model(dummy_x, *popt)
-            self.best_fit_curves = fitted_flat.reshape(3, 3, 121) * self.fit_weights[:, :, None]
+            self.best_fit_curves = fitted_flat.reshape(3, 3, self.time_series_length) * self.fit_weights[:, :, None]
             
             # === [新增] 计算 RMSE ===
             # RMSE = sqrt(mean((y_sim - y_exp)^2))
@@ -351,7 +370,7 @@ class MCXPropertyFitter:
             # 原代码逻辑中：拟合用的数据是被 flatten 且除以过权重的
             # 所以这里需要 reshape 回 (3, 3, 121) 并乘回权重，以得到真实的物理量曲线
             # 这里的 shape (3, 3, 121) 是根据你原代码推断的，请根据实际情况调整
-            self.best_fit_curves = sim_result_flat.reshape(3, 3, 121) * self.fit_weights[:, :, None]
+            self.best_fit_curves = sim_result_flat.reshape(3, 3, self.time_series_length) * self.fit_weights[:, :, None]
             
             # 保存当前使用的参数，以便后续绘图或记录使用
             self.fitted_params = np.array(params)
